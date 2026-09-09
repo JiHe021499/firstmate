@@ -8,7 +8,9 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
 # are all accepted, including a merge request or change on a self-hosted
-# instance.
+# instance; a merge request is accepted in either the current /-/merge_requests/
+# route or the legacy /merge_requests/ one an instance older than GitLab 12.0
+# serves (bin/fm-pr-lib.sh).
 # A GitHub pull request the forge reports as a draft is refused, naming the draft
 # state and recording and arming nothing: a draft cannot be merged, so a poll armed on it
 # would wait for an event that cannot occur while nobody is asked to act.
