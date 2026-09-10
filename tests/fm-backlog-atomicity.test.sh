@@ -2029,6 +2029,27 @@ test_recovery_replays_a_close_an_interrupted_cleanup_left_open() {
   pass "session start finishes a close an interrupted cleanup recorded but never landed"
 }
 
+test_recovery_lands_a_recorded_merge_request_link_the_tool_cannot_type() {
+  local case_dir id mr out
+  id=atomic-heal-merge-request-b9
+  mr=https://gitlab.example.net/heji/mss-repo/merge_requests/34
+  case_dir=$(make_home heal-pending-close-merge-request)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-mr\narg=--pr\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$mr" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "a recorded merge request left the item at $(row_state "$case_dir" "$id"): $out"
+  assert_grep "$mr" "$(backlog_of "$case_dir")" \
+    "the replayed close dropped the merge request it had recorded"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed merge-request close left its record behind, so it would fail again"
+  pass "recovery lands a recorded merge request the backlog tool cannot type as a PR link"
+}
+
 test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
   local case_dir id marker out
   id=atomic-heal-done-backfill-b9
@@ -2891,6 +2912,61 @@ test_dispatch_and_completion_are_structural() {
   pass "dispatch and completion transition structurally with evidence"
 }
 
+# The completion link a forge serves on its own route: tasks-axi types a link
+# only from `/pull/<number>`, so cleanup must still close the item and keep the
+# merge request readable on the row.
+test_completion_records_a_merge_request_link_the_tool_cannot_type() {
+  local case_dir home id meta out mr
+  id=fm-structural-merge-request-b15
+  mr=https://gitlab.example.net/heji/mss-repo/merge_requests/34
+  case_dir=$(make_home structural-merge-request "$id")
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+
+  out=$(run_ship_spawn "$case_dir" "$id") \
+    || fail "merge-request spawn failed: $out"
+  meta="$home/state/$id.meta"
+  printf 'pr=%s\n' "$mr" >> "$meta"
+
+  out=$(run_teardown "$case_dir" "$id") \
+    || fail "teardown failed on a merge request the backlog tool cannot type: $out"
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "teardown left the item outside Done after a merge-request close: $out"
+  assert_grep "$mr" "$(backlog_of "$case_dir")" \
+    "teardown closed the item without the merge request it landed"
+  assert_absent "$home/state/$id.backlog-close" \
+    "teardown left a pending close that would fail on every replay"
+  pass "completion closes with a merge request the backlog tool cannot type as a PR link"
+}
+
+# The typed path is unchanged: a GitHub pull request is still recorded as a
+# typed PR link, not demoted to prose.
+test_completion_still_types_a_pull_request_link() {
+  local case_dir home id meta out pr links
+  id=fm-structural-pull-request-b15
+  pr=https://github.com/example/firstmate/pull/16
+  case_dir=$(make_home structural-pull-request "$id")
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+
+  out=$(run_ship_spawn "$case_dir" "$id") \
+    || fail "pull-request spawn failed: $out"
+  meta="$home/state/$id.meta"
+  printf 'pr=%s\n' "$pr" >> "$meta"
+
+  out=$(run_teardown "$case_dir" "$id") \
+    || fail "pull-request teardown failed: $out"
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "teardown left the item outside Done: $out"
+  links=$(tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | sed -n 's/^  links: *//p' | head -1)
+  case "$links" in
+    *"pr $pr"*|*"$pr"*) ;;
+    *) fail "teardown stopped recording a pull request as a typed link: $links" ;;
+  esac
+  pass "completion still records a pull request as a typed link"
+}
+
 test_refused_teardown_leaves_the_item_live() {
   local case_dir home id out rc=0
   id=fm-structural-refusal-b15
@@ -3053,6 +3129,7 @@ test_recovery_marks_an_owned_record_in_flight
 test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
+test_recovery_lands_a_recorded_merge_request_link_the_tool_cannot_type
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning
@@ -3087,6 +3164,8 @@ test_spawn_refuses_an_unsafe_tasks_config_before_exempting_a_missing_backlog
 test_spawn_refuses_a_data_directory_symlinked_outside_the_home
 test_configured_adapter_refuses_a_data_directory_outside_the_home
 test_dispatch_and_completion_are_structural
+test_completion_records_a_merge_request_link_the_tool_cannot_type
+test_completion_still_types_a_pull_request_link
 test_refused_teardown_leaves_the_item_live
 test_environment_selected_adapter_is_not_forced_to_markdown
 test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog

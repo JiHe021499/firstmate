@@ -1380,7 +1380,9 @@ work_is_landed() {
 
 # The completion links this teardown already holds locally. A scout's
 # deliverable is its report, a local-only ship lands on local main, and every
-# other ship carries the PR recorded on its own record.
+# other ship carries the merge request recorded on its own record -
+# bin/fm-backlog-transition-lib.sh owns whether that link is recorded as a typed
+# PR link or as a note.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
   local data_relative
@@ -1394,7 +1396,8 @@ backlog_done_args() {
       if [ "$MODE" = local-only ]; then
         BACKLOG_DONE_ARGS=(--note "local main")
       elif [ -n "$PR_URL" ]; then
-        BACKLOG_DONE_ARGS=(--pr "$PR_URL")
+        fm_backlog_pr_link_args "$PR_URL"
+        BACKLOG_DONE_ARGS=("${FM_BACKLOG_PR_LINK_ARGS[@]+"${FM_BACKLOG_PR_LINK_ARGS[@]}"}")
       fi
       ;;
   esac
