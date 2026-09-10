@@ -12,6 +12,11 @@
 # success. Nothing else - not a later agent turn, not a printed reminder - is
 # load-bearing for the pairing.
 #   bin/fm-spawn.sh      meta published => `tasks-axi start`
+# COMPLETION LINKS. tasks-axi types a PR link from its own prose grammar, so a
+# merge request served on another route is recorded as a note instead of a typed
+# `--pr` link; fm_backlog_pr_link_supported is the one shape test, and the
+# pending-close record below stores the already-converted flags so a replay
+# cannot reoffer a link the tool refuses.
 #   bin/fm-teardown.sh   meta removed => `tasks-axi done`, or `tasks-axi reopen`
 #                        with the deliverable recorded when the row is still an
 #                        open captain call (bin/fm-captain-hold.sh `open`), so
@@ -68,6 +73,8 @@ FM_BACKLOG_ROW_ERROR=
 # the row is not held.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_ROW_HOLD_KIND=
+# The note text that records a merge request tasks-axi cannot type as a PR link.
+FM_BACKLOG_MERGE_REQUEST_NOTE_PREFIX='merge request '
 # Set by fm_backlog_close_marker_replay: closed | closed_incomplete | retained |
 # retained_incomplete | answered | stale | noop.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
@@ -568,10 +575,49 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
   fm_backlog_mutate "$data" "done" "$id" "$@"
 }
 
+# tasks-axi types a completion link from its own prose grammar, so `--pr` only
+# accepts an http(s) URL ending in `/pull/<number>` (tasks-axi 0.2.5 rejects
+# anything else with a VALIDATION_ERROR). A merge request served on another
+# route - GitLab's `/merge_requests/<number>`, for instance - is a link the tool
+# cannot type, not an unknown forge, so this is a shape test rather than a host
+# list.
+fm_backlog_pr_link_supported() {  # <url>
+  local url=${1:-} number
+  case "$url" in
+    http://*|https://*) ;;
+    *) return 1 ;;
+  esac
+  case "$url" in
+    *[[:space:]]*) return 1 ;;
+  esac
+  case "$url" in
+    */pull/*) ;;
+    *) return 1 ;;
+  esac
+  number=${url##*/pull/}
+  case "$number" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+}
+
+# The completion-link flags that record one merge-request URL. A link tasks-axi
+# can type stays a typed `--pr` link; any other one is recorded as a note so the
+# closed row still names the merge request it landed.
+FM_BACKLOG_PR_LINK_ARGS=()
+fm_backlog_pr_link_args() {  # <url>
+  FM_BACKLOG_PR_LINK_ARGS=()
+  [ -n "${1:-}" ] || return 0
+  if fm_backlog_pr_link_supported "$1"; then
+    FM_BACKLOG_PR_LINK_ARGS=(--pr "$1")
+  else
+    FM_BACKLOG_PR_LINK_ARGS=(--note "$FM_BACKLOG_MERGE_REQUEST_NOTE_PREFIX$1")
+  fi
+}
+
 fm_backlog_row_artifact_supported() {
   local id=$1 flag=${2:-} value=${3:-}
   case "$flag" in
-    --pr) return 0 ;;
+    --pr) fm_backlog_pr_link_supported "$value" ;;
     --report) [ "$value" = "data/$id/report.md" ] ;;
     *) return 1 ;;
   esac
@@ -604,7 +650,9 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
         ;;
       --pr)
         deliverable="${deliverable:+$deliverable; }PR $arg"
-        row_args=(--pr "$arg")
+        if fm_backlog_row_artifact_supported "$id" --pr "$arg"; then
+          row_args=(--pr "$arg")
+        fi
         ;;
       --note) deliverable="${deliverable:+$deliverable; }$arg" ;;
     esac
@@ -902,11 +950,93 @@ fm_backlog_close_marker_path() {  # <state-dir> <id>
   printf '%s/%s.backlog-close\n' "$1" "$2"
 }
 
+# A pending-close record is one flag value per line, so a note's spaces are
+# percent-encoded on the way in and decoded on the way out. `%` is encoded
+# first, which leaves the historic `local%20main` record byte-identical and
+# still decodable by the current reader.
+fm_backlog_marker_note_encode() {  # <text>
+  local value=${1//%/%25}
+  printf '%s' "${value// /%20}"
+}
+
+fm_backlog_marker_note_decode() {  # <encoded-text>
+  local value=${1//%20/ }
+  printf '%s' "${value//%25/%}"
+}
+
+# One completion-link URL a pending-close record may carry.
+fm_backlog_marker_url_valid() {  # <url>
+  local arg_value=$1
+  local url_tail url_authority url_path url_host url_port host_rest host_label host_valid
+  local percent_tail percent_valid
+  [ "${#arg_value}" -le 2048 ] \
+    && case "$arg_value" in https://*) true ;; *) false ;; esac \
+    && case "$arg_value" in
+      *[[:space:]]*|*[!A-Za-z0-9:/?\&=._#%+~@-]*) false ;;
+      *) true ;;
+    esac \
+    && {
+      url_tail=${arg_value#https://}
+      url_authority=${url_tail%%/*}
+      url_path=${url_tail#*/}
+      url_host=$url_authority
+      url_port=
+      case "$url_authority" in
+        *:*) url_host=${url_authority%%:*}; url_port=${url_authority#*:} ;;
+      esac
+      [ "$url_path" != "$url_tail" ] \
+        && case "$url_host" in
+          ''|[-.]*|*[-.]|*..*|*[!A-Za-z0-9.-]*) false ;;
+          *[A-Za-z0-9]*) true ;;
+          *) false ;;
+        esac \
+        && {
+          host_rest=$url_host
+          host_valid=1
+          while :; do
+            host_label=${host_rest%%.*}
+            case "$host_label" in ''|-*|*-) host_valid=0; break ;; esac
+            [ "$host_rest" = "$host_label" ] && break
+            host_rest=${host_rest#*.}
+          done
+          [ "$host_valid" = 1 ]
+        } \
+        && case "$url_authority" in
+          *:*) case "$url_port" in ''|*[!0-9]*|??????*) false ;; *) true ;; esac ;;
+          *) true ;;
+        esac \
+        && case "$url_path" in *[A-Za-z0-9]*) true ;; *) false ;; esac \
+        && {
+          percent_tail=$url_path
+          percent_valid=1
+          while case "$percent_tail" in *%*) true ;; *) false ;; esac; do
+            percent_tail=${percent_tail#*%}
+            case "$percent_tail" in
+              [0-9A-Fa-f][0-9A-Fa-f]*) percent_tail=${percent_tail#??} ;;
+              *) percent_valid=0; break ;;
+            esac
+          done
+          [ "$percent_valid" = 1 ]
+        }
+    }
+}
+
+# The note values a pending-close record may carry: the local-only landing, or
+# one merge request recorded as prose because tasks-axi cannot type its link.
+fm_backlog_marker_note_valid() {  # <encoded-note>
+  local encoded=$1 prefix
+  [ "$encoded" != "$(fm_backlog_marker_note_encode 'local main')" ] || return 0
+  prefix=$(fm_backlog_marker_note_encode "$FM_BACKLOG_MERGE_REQUEST_NOTE_PREFIX")
+  case "$encoded" in
+    "$prefix"?*) ;;
+    *) return 1 ;;
+  esac
+  fm_backlog_marker_url_valid "$(fm_backlog_marker_note_decode "${encoded#"$prefix"}")"
+}
+
 fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <expected-id> <state-dir>
   local marker=$1 authorized_data data_resolved expected_id=$3 state=$4
   local id='' data='' marker_spawn_gen='' cleanup_incomplete=0 mode=close line raw_bytes arg_value
-  local url_tail url_authority url_path url_host url_port host_rest host_label host_valid
-  local percent_tail percent_valid
   local id_count=0 data_count=0 spawn_gen_count=0 cleanup_incomplete_count=0 mode_count=0
   local args=()
   FM_BACKLOG_CLOSE_VALIDATED_ID=
@@ -1001,60 +1131,8 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     0) ;;
     2)
       case "${args[0]}" in
-        --note) [ "${args[1]}" = "local%20main" ] ;;
-        --pr)
-          arg_value=${args[1]}
-          [ "${#arg_value}" -le 2048 ] \
-            && case "$arg_value" in https://*) true ;; *) false ;; esac \
-            && case "$arg_value" in
-              *[[:space:]]*|*[!A-Za-z0-9:/?\&=._#%+~@-]*) false ;;
-              *) true ;;
-            esac \
-            && {
-              url_tail=${arg_value#https://}
-              url_authority=${url_tail%%/*}
-              url_path=${url_tail#*/}
-              url_host=$url_authority
-              url_port=
-              case "$url_authority" in
-                *:*) url_host=${url_authority%%:*}; url_port=${url_authority#*:} ;;
-              esac
-              [ "$url_path" != "$url_tail" ] \
-                && case "$url_host" in
-                  ''|[-.]*|*[-.]|*..*|*[!A-Za-z0-9.-]*) false ;;
-                  *[A-Za-z0-9]*) true ;;
-                  *) false ;;
-                esac \
-                && {
-                  host_rest=$url_host
-                  host_valid=1
-                  while :; do
-                    host_label=${host_rest%%.*}
-                    case "$host_label" in ''|-*|*-) host_valid=0; break ;; esac
-                    [ "$host_rest" = "$host_label" ] && break
-                    host_rest=${host_rest#*.}
-                  done
-                  [ "$host_valid" = 1 ]
-                } \
-                && case "$url_authority" in
-                  *:*) case "$url_port" in ''|*[!0-9]*|??????*) false ;; *) true ;; esac ;;
-                  *) true ;;
-                esac \
-                && case "$url_path" in *[A-Za-z0-9]*) true ;; *) false ;; esac \
-                && {
-                  percent_tail=$url_path
-                  percent_valid=1
-                  while case "$percent_tail" in *%*) true ;; *) false ;; esac; do
-                    percent_tail=${percent_tail#*%}
-                    case "$percent_tail" in
-                      [0-9A-Fa-f][0-9A-Fa-f]*) percent_tail=${percent_tail#??} ;;
-                      *) percent_valid=0; break ;;
-                    esac
-                  done
-                  [ "$percent_valid" = 1 ]
-                }
-            }
-          ;;
+        --note) fm_backlog_marker_note_valid "${args[1]}" ;;
+        --pr) fm_backlog_marker_url_valid "${args[1]}" ;;
         --report)
           arg_value=${args[1]}
           [ "${#arg_value}" -le 4096 ] \
@@ -1099,8 +1177,8 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
     shift
   fi
   for arg in "$@"; do
-    if [ "$previous_arg" = --note ] && [ "$arg" = "local main" ]; then
-      serialized_args+=("local%20main")
+    if [ "$previous_arg" = --note ]; then
+      serialized_args+=("$(fm_backlog_marker_note_encode "$arg")")
     else
       serialized_args+=("$arg")
     fi
@@ -1176,7 +1254,13 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   [ "$mode" = close ] || mode_flags=(--retain)
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   if [ "${args[0]-}" = --note ]; then
-    args[1]="local main"
+    args[1]=$(fm_backlog_marker_note_decode "${args[1]}")
+  fi
+  # A record written before this home learned which links tasks-axi can type may
+  # still carry a `--pr` flag the tool refuses, which would fail every replay.
+  # Convert it here, and the re-staged record below carries the converted form.
+  if [ "${args[0]-}" = --pr ] && ! fm_backlog_pr_link_supported "${args[1]}"; then
+    args=(--note "$FM_BACKLOG_MERGE_REQUEST_NOTE_PREFIX${args[1]}")
   fi
   meta="$state/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
