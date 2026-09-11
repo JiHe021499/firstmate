@@ -31,10 +31,11 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | Verb | Effect | Postcondition |
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
-| `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. |
+| `exit` | Stop the agent and remove its endpoint while preserving the worktree and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone, then endpoint removal is attempted and reported without turning an otherwise successful exit into failure. Already-stopped is idempotent success and still removes the endpoint. |
 | `relaunch` | Replace the running agent with a new one in the same endpoint and worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the recorded endpoint, and the durable record names the harness that is actually running. |
 
-An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
+An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never attempts endpoint removal.
+An endpoint removal failure is reported as `endpoint-close=failed`, while the already-proven agent stop remains successful.
 Interrupt never rewrites busy state as proof of its own success.
 Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed` and its adapter-owned busy state remains as observed.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
@@ -44,8 +45,8 @@ muse is the one verified adapter that restores the cancelled prompt back into it
 The clear is refused before anything is sent when the recorded backend cannot deliver it.
 
 **Teardown and discard are not verbs and will not become verbs.**
-`exit` stops an agent and preserves everything else.
-Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
+`exit` stops an agent and removes only its endpoint while preserving its worktree and every uncommitted change.
+Removing a worktree or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
 
 **`resume` is not a verb.**
 It is not deterministic across the verified adapters: codex, grok, and gemini resume only from a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, omp, and kimi have no verified pane-resume contract.
@@ -68,7 +69,7 @@ It is not deterministic across the verified adapters: codex, grok, and gemini re
 3. **Record the note.**
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
-4. **Stop the old agent** through the `exit` verb, with its postcondition.
+4. **Stop the old agent** through the shared stop path, with its postcondition, while deliberately skipping the explicit `exit` verb's endpoint removal.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
@@ -121,4 +122,4 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 
 - `tests/fm-control.test.sh` - the adapter contract for every verified harness, the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
 - `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
-- `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
+- `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, including explicit-exit endpoint removal and relaunch endpoint reuse, on an isolated throwaway lab session.

@@ -116,7 +116,13 @@ case "${1:-}" in
       fi
     fi
     exit 0 ;;
+  kill-window)
+    printf '%s\n' "${3:-}" >> "$D/kills"
+    [ -z "${FM_FAKE_KILL_FAIL:-}" ] || exit 1
+    : > "$D/windows"
+    exit 0 ;;
   display-message)
+    [ -s "$D/windows" ] || exit 1
     for a in "$@"; do
       case "$a" in
         *cursor_y*) printf '1\n'; exit 0 ;;
@@ -155,6 +161,7 @@ new_case() {
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/fake"
   : > "$dir/fake/literal"
   : > "$dir/fake/keys"
+  : > "$dir/fake/kills"
   printf 'zsh' > "$dir/fake/command"
   printf 'claude' > "$dir/fake/becomes"
   make_tmux_stub "$dir" >/dev/null
@@ -198,6 +205,7 @@ run_control() {
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
+    FM_FAKE_KILL_FAIL="${FM_FAKE_KILL_FAIL:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -213,6 +221,10 @@ literals() {  # <case-dir>
 # text send rather than a control-plane key.
 keys_sent() {  # <case-dir>
   grep -v '^Enter$' "$1/fake/keys" || true
+}
+
+endpoint_kills() {  # <case-dir>
+  cat "$1/fake/kills"
 }
 
 # --- 1. adapter contract across every verified harness -----------------------
@@ -233,6 +245,10 @@ test_exit_types_each_harness_verified_command() {
     [ "$(literals "$dir")" = "$expected" ] \
       || fail "exit on $harness should type exactly '$expected', got: $(literals "$dir")"
     assert_contains "$out" "stopped t1 harness=$harness" "exit should report the stop for $harness"
+    [ -n "$(endpoint_kills "$dir")" ] \
+      || fail "exit on $harness should remove the endpoint after stopping the agent"
+    assert_contains "$out" "endpoint-close=closed" \
+      "exit should report the endpoint removal for $harness"
   done
   pass "fm-control exit: every verified harness gets its own verified exit command"
 }
@@ -630,8 +646,27 @@ test_already_stopped_exit_is_idempotent() {
   out=$(run_control "$dir" t1 exit); rc=$?
   expect_code 0 "$rc" "exiting an already-stopped agent should succeed"
   assert_contains "$out" "already-stopped t1" "the outcome should say it was already stopped"
+  assert_contains "$out" "endpoint-close=closed" \
+    "an already-stopped agent should still report that its endpoint was removed"
   [ -z "$(literals "$dir")" ] || fail "an already-stopped agent must not be sent an exit command"
-  pass "fm-control exit: an already-stopped agent is idempotent success with no bytes sent"
+  [ -n "$(endpoint_kills "$dir")" ] \
+    || fail "an already-stopped agent should still have its endpoint removed"
+  pass "fm-control exit: an already-stopped agent still has its endpoint removed"
+}
+
+test_endpoint_close_failure_keeps_exit_successful_and_reports_failure() {
+  local dir out rc
+  dir=$(new_case close-failure)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(FM_FAKE_KILL_FAIL=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "an endpoint close failure must not turn a successful exit into failure"
+  assert_contains "$out" "stopped t1" "the agent stop should remain successful"
+  assert_contains "$out" "endpoint-close=failed" \
+    "the outcome should report that endpoint removal failed"
+  [ -n "$(endpoint_kills "$dir")" ] || fail "the endpoint close should have been attempted"
+  [ -s "$dir/fake/windows" ] || fail "the failed close fixture should leave the endpoint present"
+  pass "fm-control exit: endpoint removal failure is visible but remains best-effort"
 }
 
 test_missing_endpoint_refuses() {
@@ -900,6 +935,7 @@ test_verb_allowlist_is_closed
 test_resume_is_refused_with_its_reason
 test_relaunch_only_flags_are_rejected_on_other_verbs
 test_already_stopped_exit_is_idempotent
+test_endpoint_close_failure_keeps_exit_successful_and_reports_failure
 test_missing_endpoint_refuses
 test_interrupt_refuses_when_no_agent_runs
 test_ambiguous_endpoint_refuses

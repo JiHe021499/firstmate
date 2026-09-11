@@ -53,7 +53,7 @@ cat > "$HOME_DIR/data/hsmoke/brief.md" <<'EOF'
 Exercise Herdr lifecycle control safely.
 
 ## Firstmate spec
-Keep the isolated endpoint and worktree intact.
+Close the endpoint on explicit exit and preserve it on relaunch.
 EOF
 
 # A real git worktree so the control plane's checkpoint has a real local copy.
@@ -72,34 +72,41 @@ WT_REAL=$(cd "$WT" && pwd -P)
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
-CONTAINER_RAW=$(fm_backend_herdr_container_ensure "$WT") || fail "container_ensure failed"
-CONTAINER=${CONTAINER_RAW%%$'\t'*}
-SEEDED_TAB_ID=${CONTAINER_RAW#*$'\t'}
-WORKSPACE_ID=${CONTAINER#*:}
-TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-hsmoke" "$WT" "$SEEDED_TAB_ID") \
-  || fail "create_task failed"
-read -r TAB_ID PANE_ID <<EOF
+write_task_meta() {
+  {
+    echo "window=$SESSION:$PANE_ID"
+    echo "endpoint_task_id=hsmoke"
+    echo "worktree=$WT"
+    echo "project=$PROJ"
+    echo "harness=claude"
+    echo "kind=ship"
+    echo "mode=no-mistakes"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "backend=herdr"
+    echo "herdr_session=$SESSION"
+    echo "herdr_workspace_id=$WORKSPACE_ID"
+    echo "herdr_tab_id=$TAB_ID"
+    echo "herdr_pane_id=$PANE_ID"
+  } > "$HOME_DIR/state/hsmoke.meta"
+}
+
+create_task_endpoint() {
+  CONTAINER_RAW=$(fm_backend_herdr_container_ensure "$WT") || fail "container_ensure failed"
+  CONTAINER=${CONTAINER_RAW%%$'\t'*}
+  SEEDED_TAB_ID=${CONTAINER_RAW#*$'\t'}
+  WORKSPACE_ID=${CONTAINER#*:}
+  TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-hsmoke" "$WT" "$SEEDED_TAB_ID") \
+    || fail "create_task failed"
+  read -r TAB_ID PANE_ID <<EOF
 $TASK_IDS
 EOF
-[ -n "$TAB_ID" ] && [ -n "$PANE_ID" ] || fail "create_task did not return tab/pane ids"
+  [ -n "$TAB_ID" ] && [ -n "$PANE_ID" ] || fail "create_task did not return tab/pane ids"
+  write_task_meta
+}
 
-{
-  echo "window=$SESSION:$PANE_ID"
-  echo "endpoint_task_id=hsmoke"
-  echo "worktree=$WT"
-  echo "project=$PROJ"
-  echo "harness=claude"
-  echo "kind=ship"
-  echo "mode=no-mistakes"
-  echo "yolo=off"
-  echo "model=default"
-  echo "effort=default"
-  echo "backend=herdr"
-  echo "herdr_session=$SESSION"
-  echo "herdr_workspace_id=$WORKSPACE_ID"
-  echo "herdr_tab_id=$TAB_ID"
-  echo "herdr_pane_id=$PANE_ID"
-} > "$HOME_DIR/state/hsmoke.meta"
+create_task_endpoint
 
 run_control() {
   env FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" FM_SPAWN_NO_GUARD=1 \
@@ -111,10 +118,16 @@ run_control() {
 
 OUT=$(run_control hsmoke exit) || fail "exit against an agent-free herdr pane should be idempotent success: $OUT"
 case "$OUT" in
-  "already-stopped hsmoke"*) : ;;
-  *) fail "an agent-free herdr pane should report already-stopped, got: $OUT" ;;
+  "already-stopped hsmoke"*"endpoint-close=closed"*) : ;;
+  *) fail "an agent-free herdr pane should report the stopped agent and closed endpoint separately, got: $OUT" ;;
 esac
-pass "real herdr: exit on a pane with no registered agent is idempotent success"
+if herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
+  fail "explicit exit left its agent-free Herdr pane behind"
+fi
+[ -d "$WT" ] || fail "explicit exit removed the task's local copy"
+pass "real herdr: exit on an agent-free pane removes the endpoint but preserves the local copy"
+
+create_task_endpoint
 
 # --- the recovery-grade read, against the real binary ------------------------
 #
@@ -221,10 +234,15 @@ STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
 OUT=$(run_control hsmoke exit) \
   || fail "exit against a stale registration should be idempotent success: $OUT"
 case "$OUT" in
-  "already-stopped hsmoke"*) : ;;
-  *) fail "a stale registration should report already-stopped, got: $OUT" ;;
+  "already-stopped hsmoke"*"endpoint-close=closed"*) : ;;
+  *) fail "a stale registration should report the stopped agent and closed endpoint separately, got: $OUT" ;;
 esac
-pass "real herdr: a registration whose worker is gone reads dead, so the control plane can repair the endpoint instead of refusing"
+if herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
+  fail "explicit exit left the stale-registration Herdr pane behind"
+fi
+pass "real herdr: exit removes the endpoint left by a registration whose worker is gone"
+
+create_task_endpoint
 
 # --- a registered agent: classification flips, and the verbs follow ---------
 #
@@ -252,9 +270,9 @@ esac
 pass "real herdr: interrupt delivers the harness's key and proves the agent survived it"
 
 herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
-  || fail "the control plane must never remove the endpoint it was operating on"
-[ -d "$WT" ] || fail "the control plane must never remove the task's local copy"
-pass "real herdr: no control verb removed the endpoint or the task's local copy"
+  || fail "interrupt removed the endpoint it was operating on"
+[ -d "$WT" ] || fail "the control plane removed the task's local copy"
+pass "real herdr: interrupt preserves the endpoint and every control path preserves the local copy"
 
 # Last, because it deliberately types a harness command into a pane that hosts
 # a stand-in process, not a harness: the registered agent cannot be stopped
