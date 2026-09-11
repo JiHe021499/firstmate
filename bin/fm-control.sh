@@ -26,25 +26,16 @@
 #              classify that. Cancellation is confirmed only from an adapter-
 #              owned acknowledgement and otherwise reported unconfirmed. Busy
 #              state is never rewritten as proof of the action.
-#   exit       Stop the agent, preserving its terminal endpoint, worktree, and
-#              every uncommitted change. Interrupts first when the task reads
-#              busy, then submits the harness's exit command. Postcondition:
-#              the backend's recovery-grade classifier reports the agent gone.
-#              Already-stopped is success (idempotent). An endpoint that reads
-#              `missing` is put through the control plane's per-backend absence
-#              proof (fm_control_endpoint_absence_verdict) before anything is
-#              claimed about it, because `missing` also covers an endpoint that
-#              is merely unreachable from this seat. That proof exists only on
-#              HERDR, whose reads are scoped to the session the record names:
-#              proven gone reports `endpoint-gone` rather than
-#              `already-stopped`, because the endpoint this verb normally
-#              preserves did not survive; a pane that turns out to be there and
-#              idle is the ordinary `already-stopped`; one whose agent is back
-#              takes the ordinary interrupt-then-exit path. A tmux `missing`
-#              always REFUSES: a task record carries no socket identity for its
-#              endpoint, so this verb cannot tell a destroyed window from one on
-#              a tmux server it cannot address, and it will not claim a stop it
-#              cannot see.
+#   exit       Stop the agent and remove its terminal endpoint, preserving its
+#              worktree and every uncommitted change. Interrupts first when the
+#              task reads busy, then submits the harness's exit command.
+#              Postcondition: the backend's recovery-grade classifier reports
+#              the agent gone. Already-stopped is success (idempotent), and
+#              endpoint removal remains best-effort with its result reported.
+#              An endpoint that reads `missing` is put through the control
+#              plane's per-backend absence proof before anything is claimed
+#              about it; a tmux `missing` always refuses, while Herdr can report
+#              a proven-gone endpoint for relaunch to recreate.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME worktree - and the same endpoint whenever that endpoint
 #              still exists - on the same or a newly chosen
@@ -78,8 +69,8 @@
 #              running.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
-# agent and preserves everything else; removing a worktree, killing an
-# endpoint, or discarding work stays with bin/fm-teardown.sh, which owns the
+# agent and removes its endpoint while preserving its worktree; removing a
+# worktree or discarding work stays with bin/fm-teardown.sh, which owns the
 # landed-work test.
 #
 # `resume` is not a verb: it is not deterministic across the verified adapters
@@ -470,8 +461,9 @@ retire_busy_incarnation() {
   fi
 }
 
-# do_exit: stop the running agent, preserving endpoint and worktree. Prints
-# `already-stopped`, `endpoint-gone`, or `stopped`.
+# do_exit: stop the running agent while preserving its endpoint during the
+# stop operation; explicit exit removes it afterward, while relaunch reuses it.
+# Prints `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
   local state cmd verdict composer_state cancel absence interrupt_result=not-needed
   require_state_verified_backend exit
@@ -564,6 +556,19 @@ do_exit() {
   # orphaned generation survives the agent that produced it.
   retire_busy_incarnation
   printf 'stopped'
+}
+
+# close_endpoint_best_effort: remove the endpoint only for the explicit exit
+# verb. Relaunch calls do_exit directly because it reuses this same endpoint.
+close_endpoint_best_effort() {
+  local tab_id
+  tab_id=$(fm_meta_get "$META" zellij_tab_id)
+  fm_backend_kill "$BACKEND" "$T" "$tab_id" "$LABEL" >/dev/null 2>&1 || true
+  if fm_backend_target_exists "$BACKEND" "$T" "$LABEL"; then
+    printf 'failed'
+  else
+    printf 'closed'
+  fi
 }
 
 # --- transactional relaunch -------------------------------------------------
@@ -970,7 +975,8 @@ case "$VERB" in
     ;;
   exit)
     result=$(do_exit)
-    echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
+    endpoint_close=$(close_endpoint_best_effort)
+    echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T endpoint-close=$endpoint_close worktree=$WT"
     ;;
   relaunch)
     do_relaunch

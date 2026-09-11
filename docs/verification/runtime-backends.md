@@ -1392,23 +1392,29 @@ Polling remained active and is covered as the fallback for capability, connect, 
 
 ### Agent lifecycle control
 
-Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary; reverified 2026-08-08 on Herdr 0.8.0, and first measured 2026-08-02 on Herdr 0.7.5 with identical results:
+Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary.
+The explicit-exit endpoint removal and relaunch endpoint reuse were verified 2026-09-11 on Herdr 0.8.2-preview.2026-09-06-9e9bc8a14466; the classifier was first measured 2026-08-02 on Herdr 0.7.5 and reverified 2026-08-08 on Herdr 0.8.0.
 
 ```sh
-tests/fm-control-herdr-smoke.test.sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-control-exit-empty-shell)
+trap '"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"' EXIT
+"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
+bin/fm-test-run.sh tests/fm-control-herdr-smoke.test.sh
 ```
 
 Observed output, refreshed 2026-09-10 on Herdr 0.9.0 after the stale-registration fix (the two stale-registration lines are recorded under "Stale agent registration" below):
 
 ```text
-ok - real herdr: exit on a pane with no registered agent is idempotent success
+ok - real herdr: exit on an agent-free pane removes the endpoint but preserves the local copy
 ok - real herdr 0.9.0: a gone session reads recoverable while a live pane and a malformed target do not
 ok - real herdr: a drifted agent-free shell returns to its worktree and reuses the same endpoint
 ok - real herdr: interrupt refuses when herdr's own agent registry reports no agent
+ok - real herdr: exit removes the endpoint left by a registration whose worker is gone
 ok - real herdr: interrupt delivers the harness's key and proves the agent survived it
-ok - real herdr: no control verb removed the endpoint or the task's local copy
+ok - real herdr: interrupt preserves the endpoint and the task's local copy
 ok - real herdr 0.9.0: a registration Herdr keeps after its agent exits reads stale-agent and recovers as dead
-ok - real herdr: exit on a pane with a stale registration is idempotent success
+ok - real herdr: exit on a pane with a stale registration removes its endpoint
 ok - real herdr: a stale registration no longer blocks relaunch, and the endpoint and local copy survive
 ok - real herdr: an agent that does not stop fails closed instead of being reported as stopped
 ```

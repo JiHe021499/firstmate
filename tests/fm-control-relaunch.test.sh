@@ -99,7 +99,12 @@ case "${1:-}" in
       esac
     fi
     exit 0 ;;
+  kill-window)
+    printf '%s\n' "${3:-}" >> "$D/kills"
+    : > "$D/windows"
+    exit 0 ;;
   display-message)
+    [ -s "$D/windows" ] || exit 1
     for a in "$@"; do
       case "$a" in
         *cursor_y*) printf '1\n'; exit 0 ;;
@@ -186,6 +191,7 @@ new_case() {
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/fake"
   : > "$dir/fake/literal"
   : > "$dir/fake/keys"
+  : > "$dir/fake/kills"
   printf 'claude' > "$dir/fake/command"
   printf 'claude' > "$dir/fake/becomes"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
@@ -384,7 +390,11 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
     || fail "the transaction journal should end complete"
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
   assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
-  pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
+  [ ! -s "$dir/fake/kills" ] \
+    || fail "relaunch must not remove the endpoint it needs for the replacement agent"
+  [ -s "$dir/fake/windows" ] \
+    || fail "relaunch should leave the reused endpoint present"
+  pass "fm-control relaunch: a same-harness relaunch replaces the agent without removing its endpoint"
 }
 
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
