@@ -16,7 +16,8 @@
 # merge request served on another route is recorded as a note instead of a typed
 # `--pr` link; fm_backlog_pr_link_supported is the one shape test, and the
 # pending-close record below stores the already-converted flags so a replay
-# cannot reoffer a link the tool refuses.
+# cannot reoffer a link the tool refuses. Gerrit changes keep their --pr record
+# shape until the mutation helpers record them with their provider-specific label.
 #   bin/fm-teardown.sh   meta removed => `tasks-axi done`, or `tasks-axi reopen`
 #                        with the deliverable recorded when the row is still an
 #                        open captain call (bin/fm-captain-hold.sh `open`), so
@@ -85,6 +86,13 @@ FM_BACKLOG_CLOSE_REPLAY_RESULT=
 # library does not source fm-tasks-axi-lib.sh does not apply.
 # shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
+# fm-pr-lib.sh owns which URL is a Gerrit change. It is functions and empty
+# globals only, so it is sourced once rather than re-initialising a caller's
+# parsed identity.
+if ! declare -F fm_pr_url_parse >/dev/null 2>&1; then
+  # shellcheck source=bin/fm-pr-lib.sh disable=SC1091
+  . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-pr-lib.sh"
+fi
 
 # Latched when a row read hits its bound. fm_backlog_row_show runs inside a
 # command substitution, so the subshell can READ this latch but cannot set it;
@@ -516,10 +524,28 @@ fm_backlog_start() {  # <data-dir> <id>
   fm_backlog_mutate "$1" start "$2"
 }
 
+# tasks-axi takes a --pr link only as a canonical GitHub or Forgejo pull request
+# and refuses anything else, so a Gerrit change URL is recorded on the row as a
+# note instead. The subshell keeps the parse from overwriting a caller's
+# FM_PR_* identity.
+fm_backlog_pr_is_gerrit_change() {  # <url>
+  ( fm_pr_url_parse "$1" && [ "$FM_PR_PROVIDER" = gerrit ] )
+}
+
 fm_backlog_done() {  # <data-dir> <id> [flag...]
-  local data=$1 id=$2
+  local data=$1 id=$2 arg previous_arg=''
+  local -a done_args=()
   shift 2
-  fm_backlog_mutate "$data" "done" "$id" "$@"
+  for arg in "$@"; do
+    if [ "$previous_arg" = --pr ] && fm_backlog_pr_is_gerrit_change "$arg"; then
+      done_args[${#done_args[@]}-1]=--note
+      done_args+=("Gerrit change $arg")
+    else
+      done_args+=("$arg")
+    fi
+    previous_arg=$arg
+  done
+  fm_backlog_mutate "$data" "done" "$id" "${done_args[@]+"${done_args[@]}"}"
 }
 
 # tasks-axi types a completion link from its own prose grammar, so `--pr` only
@@ -549,12 +575,13 @@ fm_backlog_pr_link_supported() {  # <url>
 
 # The completion-link flags that record one merge-request URL. A link tasks-axi
 # can type stays a typed `--pr` link; any other one is recorded as a note so the
-# closed row still names the merge request it landed.
+# closed row still names the merge request it landed. Gerrit keeps its recorded
+# `--pr` shape until the mutation helpers label it as a change.
 FM_BACKLOG_PR_LINK_ARGS=()
 fm_backlog_pr_link_args() {  # <url>
   FM_BACKLOG_PR_LINK_ARGS=()
   [ -n "${1:-}" ] || return 0
-  if fm_backlog_pr_link_supported "$1"; then
+  if fm_backlog_pr_link_supported "$1" || fm_backlog_pr_is_gerrit_change "$1"; then
     FM_BACKLOG_PR_LINK_ARGS=(--pr "$1")
   else
     FM_BACKLOG_PR_LINK_ARGS=(--note "$FM_BACKLOG_MERGE_REQUEST_NOTE_PREFIX$1")
@@ -596,9 +623,13 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
         fi
         ;;
       --pr)
-        deliverable="${deliverable:+$deliverable; }PR $arg"
-        if fm_backlog_row_artifact_supported "$id" --pr "$arg"; then
-          row_args=(--pr "$arg")
+        if fm_backlog_pr_is_gerrit_change "$arg"; then
+          deliverable="${deliverable:+$deliverable; }Gerrit change $arg"
+        else
+          deliverable="${deliverable:+$deliverable; }PR $arg"
+          if fm_backlog_row_artifact_supported "$id" --pr "$arg"; then
+            row_args=(--pr "$arg")
+          fi
         fi
         ;;
       --note) deliverable="${deliverable:+$deliverable; }$arg" ;;
@@ -1205,9 +1236,11 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   fi
   # A record written before this home learned which links tasks-axi can type may
   # still carry a `--pr` flag the tool refuses, which would fail every replay.
-  # Convert it here, and the re-staged record below carries the converted form.
-  if [ "${args[0]-}" = --pr ] && ! fm_backlog_pr_link_supported "${args[1]}"; then
-    args=(--note "$FM_BACKLOG_MERGE_REQUEST_NOTE_PREFIX${args[1]}")
+  # Use the same link flags as teardown so the re-staged record carries the
+  # converted form, except Gerrit changes labelled by the mutation helpers.
+  if [ "${args[0]-}" = --pr ]; then
+    fm_backlog_pr_link_args "${args[1]}"
+    args=("${FM_BACKLOG_PR_LINK_ARGS[@]}")
   fi
   meta="$state/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
